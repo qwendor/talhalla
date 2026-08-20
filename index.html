@@ -22,6 +22,7 @@
 <body>
 <div id="wrap"><canvas id="game" width="1280" height="720"></canvas></div>
 <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script>if (typeof Peer === "undefined") document.write('<script src="https:\/\/cdn.jsdelivr.net\/npm\/peerjs@1.5.4\/dist\/peerjs.min.js"><\/script>');</script>
 <script>
 "use strict";
 
@@ -2394,16 +2395,17 @@ let onlineIdx = 0;
 const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 function genCode() { let s = ""; for (let i = 0; i < 5; i++) s += CODE_CHARS[Math.floor(Math.random() * CODE_CHARS.length)]; return s; }
 
-// STUN finds a direct path between homes; TURN relays traffic when strict
-// routers block direct P2P. Makes online work on any network, not just easy ones.
+// STUN discovers a direct path between homes; that covers most network pairs.
+// A TURN relay would also cover strict/carrier-grade NATs, but no reliable
+// free public TURN exists (openrelay.metered.ca is dead — returns no relay
+// candidates). To add one, get free credentials (e.g. metered.ca's free tier)
+// and append entries like: { urls: "turn:…", username: "…", credential: "…" }
 const PEER_OPTS = {
   config: {
     iceServers: [
       { urls: "stun:stun.l.google.com:19302" },
       { urls: "stun:stun1.l.google.com:19302" },
-      { urls: "turn:openrelay.metered.ca:80",  username: "openrelayproject", credential: "openrelayproject" },
-      { urls: "turn:openrelay.metered.ca:443", username: "openrelayproject", credential: "openrelayproject" },
-      { urls: "turn:openrelay.metered.ca:443?transport=tcp", username: "openrelayproject", credential: "openrelayproject" },
+      { urls: "stun:stun.cloudflare.com:3478" },
     ],
   },
 };
@@ -2427,6 +2429,7 @@ function applyInputByte(f, b) {
 function netCleanup() {
   if (!net) return;
   const n = net; net = null;
+  clearTimeout(n.joinTimer);
   try { if (n.peer) n.peer.destroy(); } catch (e) {}
   for (const f of fighters) f.netInput = null;
 }
@@ -2533,13 +2536,21 @@ function startJoin(code) {
   net = { role: "client", code, status: "connecting", err: null, lobby: null, mySlot: -1, snap: null, hostPicking: false };
   gameMode = "party";
   net.peer = new Peer(PEER_OPTS);
+  // signaling can find the room yet the P2P link still fail (strict/carrier NAT
+  // with no TURN relay available) — without this the joiner spins forever
+  net.joinTimer = setTimeout(() => {
+    if (net && net.role === "client" && net.status !== "connected" && !net.err) {
+      net.err = "Found the room but the connection was blocked — try again, or use a phone hotspot / same Wi-Fi.";
+    }
+  }, 16000);
   net.peer.on("open", () => {
     if (!net) return;
     const c = net.peer.connect("talhalla-" + code.toLowerCase(), { reliable: true });
     net.host = c;
-    c.on("open", () => { if (net) net.status = "connected"; });
+    c.on("open", () => { if (net) { net.status = "connected"; clearTimeout(net.joinTimer); } });
     c.on("data", d => clientMsg(d));
     c.on("close", () => { if (net && net.role === "client") { netCleanup(); state = "menu"; } });
+    c.on("error", () => { if (net && net.status !== "connected" && !net.err) net.err = "Connection failed — try again, or use a phone hotspot / same Wi-Fi."; });
   });
   net.peer.on("error", err => {
     if (!net) return;
